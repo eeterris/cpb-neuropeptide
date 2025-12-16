@@ -693,7 +693,9 @@ library(purrr)
 library(readr)
 
 # load and clean raw feeding data
-feeding_3_raw <- read.csv("feeding_3rd.csv") %>%
+feeding_3_raw <- readr::read_csv(
+  here("data", "derived", "feeding_3rd.csv")
+) %>%
   select(-`Weight..g.`, -`X..Defoliation`, -Notes, -GroupCore, -Instar, 
          -avg_beetle_weight, -defol_corrected) %>%
   rename(Adults = `Emerged.Adults`,
@@ -813,8 +815,11 @@ feeding_3_prog <- feeding_3_prog %>%
   rename(Beetle_ID = Global_Beetle_ID)
 
 # export
-write.csv(feeding_3_prog, "feeding_3_beetle_prog.csv", row.names = FALSE)
-
+write.csv(
+  feeding_3_prog,
+  here("results", "feeding", "feeding_3_beetle_prog.csv"),
+  row.names = FALSE
+)
 
 # generate start–stop transition table
 feeding_3_start_stop <- feeding_3_prog %>%
