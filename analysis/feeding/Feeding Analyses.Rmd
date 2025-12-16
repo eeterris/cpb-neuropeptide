@@ -489,7 +489,7 @@ library(survminer)
 library(readr)
 
 feeding <- read_csv(
-  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Feeding Trial.csv",
+  here("data", "inputs", "feeding_trial_data.csv"),
   na = c("NA","N/A","")
 ) %>%
   rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`) %>%
@@ -581,7 +581,7 @@ library(readr)
 
 # you have to rebuild the dataset here becuase of filtering you did earlier
 feeding <- read_csv(
-  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Feeding Trial.csv",
+  here("data", "inputs", "feeding_trial_data.csv"),
   na = c("NA","N/A","")
 ) %>%
   rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`) %>%
@@ -599,8 +599,7 @@ feeding <- read_csv(
     )
   )
 
-injection <- read_csv(
-  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Injection Trial (1).csv",
+injection <- readr::read_csv(here("data", "inputs", "injection_trial_data.csv"),
   na = c("NA","N/A","")
 ) %>%
   rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`)
