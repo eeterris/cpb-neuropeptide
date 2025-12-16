@@ -17,19 +17,19 @@ library(lme4)
 library(betareg)
 library(survival)
 library(survminer)
+library(here)
+knitr::opts_knit$set(root.dir = here::here())
 ```
 
 ```{r load and clean data}
 library(tidyverse)
 
 # read data treat "N/A" as missing
-feeding <- read_csv("Feeding Trial Data.csv", na = c("NA", "N/A", "")
-)
+feeding <- readr::read_csv(here("data", "inputs", "feeding_trial_data.csv"))
+
 
 # load in injection for later merging of uninjected control
-injection <- read_csv("Injection Trial Data.csv",
-  na = c("NA", "N/A", "")
-)
+injection <- readr::read_csv(here("data", "inputs", "injection_trial_data.csv"))
 
 feeding_palette <- c(
   "Control_Uninjected" = "#A8E6A3",  
