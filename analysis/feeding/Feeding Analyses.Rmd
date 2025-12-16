@@ -1,0 +1,1341 @@
+---
+title: "Feeding Data Analyses Public"
+author: "Emma"
+date: "2025-12-16"
+output: html_document
+---
+
+```{r library loading}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(stringr)
+library(mgcv)
+library(ggplot2)
+library(lmtest)
+library(lme4)
+library(betareg)
+library(survival)
+library(survminer)
+```
+
+```{r load and clean data}
+library(tidyverse)
+
+# read data treat "N/A" as missing
+feeding <- read_csv("Feeding Trial Data.csv", na = c("NA", "N/A", "")
+)
+
+# load in injection for later merging of uninjected control
+injection <- read_csv("Injection Trial Data.csv",
+  na = c("NA", "N/A", "")
+)
+
+feeding_palette <- c(
+  "Control_Uninjected" = "#A8E6A3",  
+  "Control_dsRNA"      = "#4CAF50",  
+  "GPA2_Low"           = "#81D4FA",  
+  "GPA2_High"          = "#0288D1", 
+  "LGR1_Low"           = "#CE93D8", 
+  "LGR1_High"          = "#8E24AA" 
+)
+
+# standardize feeding data
+feeding <- feeding %>%
+  rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`) %>%
+  mutate(
+    GroupCore       = str_sub(CPB_Group, 1, 6),
+    Instar          = str_sub(CPB_Group, 1, 1),
+    `Weight (g)`    = parse_number(as.character(`Weight (g)`), na = c("NA","N/A","")),
+    Defoliation     = parse_number(as.character(`% Defoliation`), na = c("NA","N/A","")),
+    avg_beetle_weight = if_else(Alive > 0 & !is.na(`Weight (g)`),
+                                `Weight (g)` / Alive, NA_real_),
+    defol_corrected = if_else(Alive > 0 & !is.na(Defoliation),
+                              Defoliation / Alive, NA_real_),
+    Treatment = case_when(
+      GroupCore %in% c("3FC11", "3FC12") ~ "Control_Uninjected",
+      GroupCore %in% c("3FC31", "3FC32", "4FC31", "4FC32") ~ "Control_dsRNA",
+      GroupCore %in% c("3FGD11", "3FGD12", "4FGD11", "4FGD12") ~ "GPA2_Low",
+      GroupCore %in% c("3FGD21", "3FGD22", "4FGD21", "4FGD22") ~ "GPA2_High",
+      GroupCore %in% c("3FLD11", "3FLD12", "4FLD11", "4FLD12") ~ "LGR1_Low",
+      GroupCore %in% c("3FLD21", "3FLD22", "4FLD21", "4FLD22") ~ "LGR1_High",
+      TRUE ~ NA_character_
+    ),
+    Treatment = factor(Treatment, levels = names(feeding_palette))
+  ) %>%
+  select(-`% Defoliation`)
+
+# split by instar
+feeding_3rd <- feeding %>%
+  filter(Instar == "3", !is.na(avg_beetle_weight)) %>%
+  arrange(CPB_Group, Assay_Day)
+
+feeding_4th <- feeding %>%
+  filter(Instar == "4", !is.na(avg_beetle_weight)) %>%
+  arrange(CPB_Group, Assay_Day)
+
+# merge uninjected 4th from injection
+uninjected_4th <- injection %>%
+  rename(CPB_Group = `CPB Group`, Assay_Day = `Assay Day`) %>%
+  filter(str_detect(CPB_Group, "^C1\\.")) %>%
+  mutate(
+    `Weight (g)`    = parse_number(as.character(`Weight (g)`), na = c("NA","N/A","")),
+    Defoliation     = parse_number(as.character(`% Defoliation`), na = c("NA","N/A","")),
+    avg_beetle_weight = if_else(Alive > 0 & !is.na(`Weight (g)`),
+                                `Weight (g)` / Alive, NA_real_),
+    Treatment   = "Control_Uninjected",
+    Instar      = "4",
+    GroupPrefix = str_extract(CPB_Group, "^[^\\.]+"),
+    Treatment   = factor(Treatment, levels = names(feeding_palette))
+  ) %>%
+  select(-`% Defoliation`)
+
+feeding_4th <- bind_rows(feeding_4th, uninjected_4th) %>%
+  filter(!is.na(avg_beetle_weight), !is.na(Assay_Day))
+
+```
+
+# Weight Analyses:
+
+```{r 3rd instar weight}
+
+# try different models for best fit
+linear_3rd    <- lmer(avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group), data = feeding_3rd)
+quadratic_3rd <- lmer(avg_beetle_weight ~ Treatment * (Assay_Day + I(Assay_Day^2)) + (1 | CPB_Group), data = feeding_3rd)
+quartic_3rd   <- lmer(avg_beetle_weight ~ Treatment * (Assay_Day + I(Assay_Day^2) + I(Assay_Day^3) + I(Assay_Day^4)) + (1 | CPB_Group), data = feeding_3rd)
+timefactor_3rd<- lmer(avg_beetle_weight ~ Treatment * as.factor(Assay_Day) + (1 | CPB_Group), data = feeding_3rd)
+gam_3rd       <- gam(avg_beetle_weight ~ CPB_Group + s(Assay_Day, k = 3), data = feeding_3rd)
+
+summary(gam_3rd)
+
+# Durbin-Watson on GAM residuals
+feeding_3rd_sorted <- feeding_3rd %>%
+  arrange(CPB_Group, Assay_Day) %>%
+  filter(!is.na(avg_beetle_weight))
+
+gam_sorted_3rd <- gam(avg_beetle_weight ~ CPB_Group + s(Assay_Day, k = 6), data = feeding_3rd_sorted)
+dwtest(gam_sorted_3rd$residuals ~ 1)
+
+# compare model fits by BIC
+cat("BICs for 3rd Instar Models:\n")
+cat("  Linear:      ", BIC(linear_3rd), "\n") #-286.0716 
+cat("  Quadratic:   ", BIC(quadratic_3rd), "\n") #-193.1467 
+cat("  Quartic:     ", BIC(quartic_3rd), "\n") #-20.33142
+cat("  Time Factor: ", BIC(timefactor_3rd), "\n") #-51.66449
+cat("  GAM:         ", BIC(gam_3rd), "\n") #-416.8442
+
+    #GAM is best fit according to BIC, but using linear model for interpretation because of slope differences and easier to interpret... will visualize with the GAM for consistency across all tests
+
+# visualize GAM fit
+feeding_3rd <- feeding_3rd %>%
+  mutate(prediction_gam = predict(gam_3rd, newdata = feeding_3rd))
+
+ggplot(feeding_3rd, aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) +
+  geom_point() +
+  geom_line(aes(y = prediction_gam)) +
+  xlim(0, 7) +
+  labs(title = "3rd Instar: GAM Fit", x = "Assay Day", y = "Avg Beetle Weight") +
+  theme_minimal()
+
+# test for significance (nested models)
+lmm_reml_3rd <- lmer(avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group),
+                     data = feeding_3rd, REML = TRUE)
+lmm_ml_3rd   <- update(lmm_reml_3rd, REML = FALSE)
+
+# reduced forms
+lmm_additive_3rd <- lmer(avg_beetle_weight ~ Treatment + Assay_Day + (1 | CPB_Group),
+                         data = feeding_3rd, REML = FALSE)
+lmm_noday_3rd    <- lmer(avg_beetle_weight ~ Treatment + (1 | CPB_Group),
+                         data = feeding_3rd, REML = FALSE)
+lmm_notreat_3rd  <- lmer(avg_beetle_weight ~ Assay_Day + (1 | CPB_Group),
+                         data = feeding_3rd, REML = FALSE)
+
+# likelihood ratio tests
+anova(lmm_additive_3rd, lmm_ml_3rd)      # test for interaction, not significant (p = 0.169)
+anova(lmm_noday_3rd, lmm_ml_3rd)         # test for day effect, (p < 0.001): beetle weight increases over days
+anova(lmm_notreat_3rd, lmm_ml_3rd)       # test for treatment effect, not significant (p = 0.33)
+anova(lmm_notreat_3rd, lmm_additive_3rd) # treatment effect after accounting for day, not significant (p = 0.60)
+
+summary(lmm_reml_3rd)
+
+# visualize the GAM fit with same palette and same style
+# summarize predictions for mean ± SE
+feed_gam3_summary <- feeding_3rd %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(prediction_gam, na.rm = TRUE),
+    se_pred   = sd(prediction_gam, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot() +
+  # individual dish-level lines
+  geom_line(
+    data = feeding_3rd,
+    aes(x = Assay_Day, y = prediction_gam, group = CPB_Group, color = Treatment),
+    alpha = 0.3, size = 0.6
+  ) +
+  # SE ribbons around mean
+  geom_ribbon(
+    data = feed_gam3_summary,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2, color = NA
+  ) +
+  # treatment-level mean lines
+  geom_line(
+    data = feed_gam3_summary,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(values = feeding_palette, aesthetics = c("color", "fill")) +
+  scale_x_continuous(limits = c(0, 7), breaks = 0:7) +
+  labs(
+    title = "3rd Instar: Weight over Time by Treatment",
+    x = "Assay Day",
+    y = "Average Beetle Weight (g)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+```
+
+```{r 4th instar weights}
+
+# try different models for best fit
+linear_4th    <- lmer(avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group), data = feeding_4th)
+quadratic_4th <- lmer(avg_beetle_weight ~ Treatment * (Assay_Day + I(Assay_Day^2)) + (1 | CPB_Group), data = feeding_4th)
+quartic_4th   <- lmer(avg_beetle_weight ~ Treatment * (Assay_Day + I(Assay_Day^2) + I(Assay_Day^3) + I(Assay_Day^4)) + (1 | CPB_Group), data = feeding_4th)
+timefactor_4th <- lmer(avg_beetle_weight ~ Treatment * as.factor(Assay_Day) + (1 | CPB_Group), data = feeding_4th)
+gam_4th       <- gam(avg_beetle_weight ~ CPB_Group + s(Assay_Day, k = 3), data = feeding_4th)
+
+# summary(gam_4th)
+
+# Durbin-Watson on GAM residuals
+feeding_4th_sorted <- feeding_4th %>%
+  arrange(CPB_Group, Assay_Day) %>%
+  filter(!is.na(avg_beetle_weight))
+
+gam_sorted_4th <- gam(avg_beetle_weight ~ CPB_Group + s(Assay_Day, k = 6), data = feeding_4th_sorted)
+dwtest(gam_sorted_4th$residuals ~ 1)
+
+# compare model fits by BIC
+cat("BICs for 4th Instar Models:\n")
+cat("  Linear:      ", BIC(linear_4th), "\n") #-262.7565
+cat("  Quadratic:   ", BIC(quadratic_4th), "\n") #-262.5504 
+cat("  Quartic:     ", BIC(quartic_4th), "\n") #-93.20968
+cat("  Time Factor: ", BIC(timefactor_4th), "\n") #-149.2589
+cat("  GAM:         ", BIC(gam_4th), "\n") #-445.3866
+
+# once again GAM is the best fit according to BIC, but we will use the linear model for testing between groups and then GAM for visual representation as we did in the other groups for interpretation and continuity ?
+
+# test for significance (nested models)
+lmm_reml_4th <- lmer(avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group),
+                     data = feeding_4th, REML = TRUE)
+lmm_ml_4th   <- update(lmm_reml_4th, REML = FALSE)
+
+# reduced forms
+lmm_additive_4th <- lmer(avg_beetle_weight ~ Treatment + Assay_Day + (1 | CPB_Group),
+                         data = feeding_4th, REML = FALSE)
+lmm_noday_4th    <- lmer(avg_beetle_weight ~ Treatment + (1 | CPB_Group),
+                         data = feeding_4th, REML = FALSE)
+lmm_notreat_4th  <- lmer(avg_beetle_weight ~ Assay_Day + (1 | CPB_Group),
+                         data = feeding_4th, REML = FALSE)
+
+# likelihood ratio tests
+anova(lmm_additive_4th, lmm_ml_4th)      # test for interaction, not significant (p = 0.91)
+anova(lmm_noday_4th, lmm_ml_4th)         # test for day effect, (p < 0.001): beetle weight increases over days
+anova(lmm_notreat_4th, lmm_ml_4th)       # test for treatment effect...
+    # comparing treatment-only vs treatment + day: p = 0.0047 → some evidence of treatment influence
+    # but in the full interaction model, treatment effect was not significant (p = 0.33)
+    # treatment effects were explained by time, not consistent differences among treatments ???
+anova(lmm_notreat_4th, lmm_additive_4th) # treatment effect after accounting for day, not significant (p = 0.60)
+
+summary(lmm_reml_4th)
+
+# visualize the GAM fit with same palette and same style
+# add GAM predictions to the data
+feeding_4th <- feeding_4th %>%
+  dplyr::mutate(prediction_gam4 = predict(gam_4th, newdata = feeding_4th))
+
+# compute treatment mean lines
+mean_lines_4th <- feeding_4th %>%
+  dplyr::group_by(Treatment, Assay_Day) %>%
+  dplyr::summarise(mean_pred4 = mean(prediction_gam4, na.rm = TRUE), .groups = "drop")
+
+ggplot(feeding_3rd, aes(x = Assay_Day, color = Treatment)) +
+  geom_line(aes(y = prediction_gam, group = CPB_Group),
+            alpha = 0.3, size = 0.6) +
+  stat_summary(aes(y = prediction_gam, fill = Treatment),
+               fun = mean, geom = "line", size = 1.2) +
+  scale_color_manual(values = feeding_palette) +
+  scale_fill_manual(values = feeding_palette) +
+  scale_x_continuous(limits = c(0, 7), breaks = 0:7) +
+  labs(
+    title = "3rd Instar: GAM Fit",
+    x = "Assay Day",
+    y = "Avg Beetle Weight (g)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+# visualize the GAM fit with same palette and same style
+feed_gam4_summary <- feeding_4th %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(prediction_gam4, na.rm = TRUE),
+    se_pred   = sd(prediction_gam4, na.rm = TRUE) / sqrt(n())
+  ) %>%
+  ungroup()
+
+feeding_4th$Treatment <- factor(feeding_4th$Treatment, levels = names(feeding_palette))
+feed_gam4_summary$Treatment <- factor(feed_gam4_summary$Treatment, levels = names(feeding_palette))
+
+ggplot() +
+  geom_line(
+    data = feeding_4th %>%
+      filter(Assay_Day <= max(feed_gam4_summary$Assay_Day)),
+    aes(x = Assay_Day, y = prediction_gam4, group = CPB_Group, color = Treatment),
+    alpha = 0.3,
+    size = 0.6
+  ) +
+  geom_ribbon(
+    data = feed_gam4_summary,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2,
+    color = NA
+  ) +
+  geom_line(
+    data = feed_gam4_summary,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(
+    values = feeding_palette,
+    aesthetics = c("color", "fill")
+  ) +
+  labs(
+    x = "Assay Day",
+    y = "Average Beetle Weight (g)",
+    title = "4th Instar: Weight Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+```
+
+# Defoliation Analyses:
+
+```{r beta regression for 3rd instar defoliation}
+
+library(dplyr)
+library(ggplot2)
+library(betareg)
+
+# use only rows with recorded defoliation
+feed_defol3 <- feeding_3rd %>%
+  filter(!is.na(Defoliation), !is.na(Assay_Day), !is.na(Treatment), !is.na(Alive)) %>%
+  mutate(
+    # map % to (0,1); tiny offset guards against exact 0/1
+    defol_01  = (Defoliation + 0.001) / 100.002,
+    Treatment = factor(Treatment, levels = names(feeding_palette))
+  )
+
+beta_defol_3rd <- betareg(defol_01 ~ Treatment * Assay_Day + Alive, data = feed_defol3)
+summary(beta_defol_3rd)
+
+# predictions on the same rows (response scale 0–1)
+feed_defol3 <- feed_defol3 %>%
+  mutate(pred_beta = predict(beta_defol_3rd, newdata = feed_defol3, type = "response"))
+
+# summaries in % units (mean from model preds; SE from observed proportions)
+feed_beta3_summary <- feed_defol3 %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(pred_beta, na.rm = TRUE) * 100,                # %
+    se_pred   = (sd(defol_01, na.rm = TRUE) / sqrt(n())) * 100,     # %
+    .groups   = "drop"
+  )
+
+# individual dish lines (predicted) + treatment means (with SE ribbons)
+feed_timeasfactor_data3 <- feed_defol3 %>%
+  mutate(predicted_defol = pred_beta * 100) # %
+
+feed_timeasfactor_summary3 <- feed_beta3_summary
+
+ggplot() +
+  geom_line(
+    data = feed_timeasfactor_data3,
+    aes(x = Assay_Day, y = predicted_defol, group = CPB_Group, color = Treatment),
+    alpha = 0.3, size = 0.6
+  ) +
+  geom_ribbon(
+    data = feed_timeasfactor_summary3,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2, color = NA
+  ) +
+  geom_line(
+    data = feed_timeasfactor_summary3,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(values = feeding_palette) +
+  scale_fill_manual(values = feeding_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Defoliation (%)",
+    title = "3rd Instar Feeding Trial: Defoliation Over Time (Beta Regression)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(), legend.position = "right")
+
+
+# plot raw data just to check
+ggplot(feed_defol3, aes(x = Assay_Day, y = Defoliation, color = Treatment)) +
+geom_point(alpha = 0.5, size = 2) +                # raw points
+geom_line(aes(group = CPB_Group), alpha = 0.3) +   # connect points by dish
+labs(
+title = "3rd Instar Feeding Trial: Raw Defoliation Data",
+x = "Assay Day",
+y = "Defoliation (%)") +
+theme_minimal(base_size = 12) +
+theme(panel.grid = element_blank(),
+legend.position = "right")
+
+```
+
+```{r beta regression for 4th instar defoliation}
+
+library(dplyr)
+library(ggplot2)
+library(betareg)
+
+# use only rows with recorded defoliation
+feed_defol4 <- feeding_4th %>%
+  filter(!is.na(Defoliation), !is.na(Assay_Day), !is.na(Treatment), !is.na(Alive)) %>%
+  mutate(
+    # map % to (0,1); tiny offset guards against exact 0/1
+    defol_01  = (Defoliation + 0.001) / 100.002,
+    Treatment = factor(Treatment, levels = names(feeding_palette))
+  )
+
+beta_defol_4th <- betareg(defol_01 ~ Treatment * Assay_Day + Alive, data = feed_defol4)
+summary(beta_defol_4th)
+
+feed_defol4 <- feed_defol4 %>%
+  mutate(pred_beta = predict(beta_defol_4th, newdata = feed_defol4, type = "response"))
+
+# summaries in % units (mean from model preds; SE from observed proportions)
+feed_beta4_summary <- feed_defol4 %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(pred_beta, na.rm = TRUE) * 100,                # %
+    se_pred   = (sd(defol_01, na.rm = TRUE) / sqrt(n())) * 100,     # %
+    .groups   = "drop"
+  )
+
+# individual dish lines (predicted) + treatment means (with SE ribbons)
+feed_timeasfactor_data4 <- feed_defol4 %>%
+  mutate(predicted_defol = pred_beta * 100) # %
+
+feed_timeasfactor_summary4 <- feed_beta4_summary
+
+ggplot() +
+  geom_line(
+    data = feed_timeasfactor_data4,
+    aes(x = Assay_Day, y = predicted_defol, group = CPB_Group, color = Treatment),
+    alpha = 0.3, size = 0.6
+  ) +
+  geom_ribbon(
+    data = feed_timeasfactor_summary4,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2, color = NA
+  ) +
+  geom_line(
+    data = feed_timeasfactor_summary4,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(values = feeding_palette) +
+  scale_fill_manual(values = feeding_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Defoliation (%)",
+    title = "4th Instar Feeding Trial: Defoliation Over Time (Beta Regression)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(), legend.position = "right")
+
+```
+
+# Survival Analyses: 
+
+```{r kaplan-meier survival 3rd instar}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(readr)
+
+feeding <- read_csv(
+  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Feeding Trial.csv",
+  na = c("NA","N/A","")
+) %>%
+  rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`) %>%
+  mutate(
+    GroupCore = str_sub(CPB_Group, 1, 6),
+    Instar    = str_sub(CPB_Group, 1, 1),
+    Treatment = case_when(
+      GroupCore %in% c("3FC11","3FC12")                        ~ "Control_Uninjected", 
+      GroupCore %in% c("3FC31","3FC32","4FC31","4FC32")        ~ "Control_dsRNA",
+      GroupCore %in% c("3FGD11","3FGD12","4FGD11","4FGD12")    ~ "GPA2_Low",
+      GroupCore %in% c("3FGD21","3FGD22","4FGD21","4FGD22")    ~ "GPA2_High",
+      GroupCore %in% c("3FLD11","3FLD12","4FLD11","4FLD12")    ~ "LGR1_Low",
+      GroupCore %in% c("3FLD21","3FLD22","4FLD21","4FLD22")    ~ "LGR1_High",
+      TRUE ~ NA_character_
+    )
+  )
+
+feeding_palette <- c(
+  "Control_Uninjected" = "#A8E6A3",
+  "Control_dsRNA"      = "#4CAF50",
+  "GPA2_Low"           = "#81D4FA",
+  "GPA2_High"          = "#0288D1",
+  "LGR1_Low"           = "#CE93D8",
+  "LGR1_High"          = "#8E24AA"
+)
+
+# 3rd-instar dataset for survival
+feeding_3rd_all <- feeding %>%
+  filter(Instar == "3", !is.na(Assay_Day), !is.na(Treatment)) %>%
+  select(CPB_Group, Treatment, Assay_Day, Alive, Dead) %>%
+  mutate(Treatment = factor(Treatment, levels = names(feeding_palette))) %>%
+  arrange(Treatment, CPB_Group, Assay_Day)
+
+feed3_death_rows <- feeding_3rd_all %>%
+  filter(!is.na(Dead), Dead > 0) %>%
+  tidyr::uncount(weights = Dead) %>%
+  mutate(time = Assay_Day, status = 1L)
+
+feed3_survivor_rows <- feeding_3rd_all %>%
+  group_by(CPB_Group, Treatment) %>%
+  slice_max(Assay_Day, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(!is.na(Alive), Alive > 0) %>%
+  tidyr::uncount(weights = Alive) %>%
+  mutate(time = Assay_Day, status = 0L)
+
+feed3_survival_long <- bind_rows(feed3_death_rows, feed3_survivor_rows) %>%
+  mutate(Treatment = factor(Treatment, levels = names(feeding_palette)))
+
+# Kaplan–Meier fit + plot
+feed3_km_fit <- survfit(Surv(time, status) ~ Treatment, data = feed3_survival_long)
+
+ggsurvplot(
+  fit = feed3_km_fit,
+  data = feed3_survival_long,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlim = c(0, 28),
+  break.time.by = 1,
+  palette = unname(feeding_palette),
+  title = "3rd Instar Feeding Trial: Kaplan–Meier Survival by Treatment",
+  xlab = "Assay Day",
+  ylab = "Survival Probability"
+)
+
+# log-rank tests
+logrank_overall_3rd <- survdiff(Surv(time, status) ~ Treatment, data = feed3_survival_long)
+logrank_overall_3rd
+
+logrank_pairwise_BH_3rd <- pairwise_survdiff(Surv(time, status) ~ Treatment,
+                                             data = feed3_survival_long,
+                                             p.adjust.method = "BH")
+logrank_pairwise_BH_3rd
+
+logrank_pairwise_bonf_3rd <- pairwise_survdiff(Surv(time, status) ~ Treatment,
+                                               data = feed3_survival_long,
+                                               p.adjust.method = "bonferroni")
+logrank_pairwise_bonf_3rd
+```
+
+```{r kaplan-meier survival 4th instar}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(readr)
+
+# you have to rebuild the dataset here becuase of filtering you did earlier
+feeding <- read_csv(
+  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Feeding Trial.csv",
+  na = c("NA","N/A","")
+) %>%
+  rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`) %>%
+  mutate(
+    GroupCore = str_sub(CPB_Group, 1, 6),
+    Instar    = str_sub(CPB_Group, 1, 1),
+    Treatment = case_when(
+      GroupCore %in% c("3FC11","3FC12")                 ~ "Control_Uninjected", 
+      GroupCore %in% c("3FC31","3FC32","4FC31","4FC32") ~ "Control_dsRNA",
+      GroupCore %in% c("3FGD11","3FGD12","4FGD11","4FGD12") ~ "GPA2_Low",
+      GroupCore %in% c("3FGD21","3FGD22","4FGD21","4FGD22") ~ "GPA2_High",
+      GroupCore %in% c("3FLD11","3FLD12","4FLD11","4FLD12") ~ "LGR1_Low",
+      GroupCore %in% c("3FLD21","3FLD22","4FLD21","4FLD22") ~ "LGR1_High",
+      TRUE ~ NA_character_
+    )
+  )
+
+injection <- read_csv(
+  "~/Library/CloudStorage/GoogleDrive-eterris@wisc.edu/Shared drives/Neuropeptide Project/Neuropeptide Phenotypic Trial 1 (GPA2/GPA2_LGR1 - Injection Trial (1).csv",
+  na = c("NA","N/A","")
+) %>%
+  rename(Assay_Day = `Assay Day`, CPB_Group = `CPB Group`)
+
+feeding_palette <- c(
+  "Control_Uninjected" = "#A8E6A3",
+  "Control_dsRNA"      = "#4CAF50",
+  "GPA2_Low"           = "#81D4FA",
+  "GPA2_High"          = "#0288D1",
+  "LGR1_Low"           = "#CE93D8",
+  "LGR1_High"          = "#8E24AA"
+)
+
+# build 4th-instar dataset again ignoring other factors because they limit the days in analysis
+feeding_4th_all <- feeding %>%
+  filter(Instar == "4", !is.na(Assay_Day), !is.na(Treatment)) %>%
+  select(CPB_Group, Treatment, Assay_Day, Alive, Dead)
+
+# add uninjected 4th from injection (keep only survival columns)
+uninjected_4th <- injection %>%
+  filter(str_detect(CPB_Group, "^C1\\.")) %>%            
+  mutate(Treatment = "Control_Uninjected") %>%
+  select(CPB_Group, Treatment, Assay_Day, Alive, Dead)
+
+feed4_for_survival <- bind_rows(feeding_4th_all, uninjected_4th) %>%
+  mutate(Treatment = factor(Treatment, levels = names(feeding_palette))) %>%
+  arrange(Treatment, CPB_Group, Assay_Day)
+
+# survival long table
+feed4_death_rows <- feed4_for_survival %>%
+  filter(!is.na(Dead), Dead > 0) %>%
+  tidyr::uncount(weights = Dead) %>%
+  mutate(time = Assay_Day, status = 1L)
+
+# survivor rows
+feed4_survivor_rows <- feed4_for_survival %>%
+  group_by(CPB_Group, Treatment) %>%
+  slice_max(Assay_Day, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(!is.na(Alive), Alive > 0) %>%
+  tidyr::uncount(weights = Alive) %>%
+  mutate(time = Assay_Day, status = 0L)
+
+feed4_survival_long <- bind_rows(feed4_death_rows, feed4_survivor_rows) %>%
+  mutate(Treatment = factor(Treatment, levels = names(feeding_palette)))
+
+# Kaplan–Meier fit + plot 
+feed4_km_fit <- survfit(Surv(time, status) ~ Treatment, data = feed4_survival_long)
+
+ggsurvplot(
+  fit = feed4_km_fit,
+  data = feed4_survival_long,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlab = "Assay Day",
+  ylab = "Survival Probability",
+  title = "4th Instar Feeding Trial: Kaplan–Meier Survival by Treatment",
+  palette = unname(feeding_palette),
+  break.time.by = 1
+)
+
+
+# log-rank tests for overall survival differences across treatments
+logrank_overall_4th <- survdiff(Surv(time, status) ~ Treatment,
+                                data = feed4_survival_long)
+logrank_overall_4th
+
+# pairwise log-rank tests with BH correction
+logrank_pairwise_BH_4th <- pairwise_survdiff(Surv(time, status) ~ Treatment,
+                                             data = feed4_survival_long,
+                                             p.adjust.method = "BH")
+logrank_pairwise_BH_4th
+
+# pairwise log-rank tests with Bonferroni correction
+logrank_pairwise_bonf_4th <- pairwise_survdiff(Surv(time, status) ~ Treatment,
+                                               data = feed4_survival_long,
+                                               p.adjust.method = "bonferroni")
+logrank_pairwise_bonf_4th
+
+
+```
+
+# Development Analyses: 
+
+```{r feeding 3rd data transform}
+# libraries
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+
+# load and clean raw feeding data
+feeding_3_raw <- read.csv("feeding_3rd.csv") %>%
+  select(-`Weight..g.`, -`X..Defoliation`, -Notes, -GroupCore, -Instar, 
+         -avg_beetle_weight, -defol_corrected) %>%
+  rename(Adults = `Emerged.Adults`,
+         Assay.Day = Assay_Day,
+         CPB.Group = CPB_Group)
+
+# pivot life stage columns to long format
+feeding_3_long <- feeding_3_raw %>%
+  pivot_longer(
+    cols = c(Alive, Dead, Incapacitated, Pupating, Adults),
+    names_to = "Life_Stage",
+    values_to = "Count"
+  )
+
+# expand each row so each beetle is its own row
+feeding_3_expanded <- feeding_3_long %>%
+  uncount(weights = Count)
+
+# define numeric life stage codes
+life_stage_codes <- c(
+  Alive = 1,
+  Incapacitated = 2,
+  Pupating = 3,
+  Adults = 4,
+  Dead = 5
+)
+
+# prepare wide-format daily counts
+feeding_3_counts_wide <- feeding_3_raw %>%
+  mutate(across(c(Alive, Dead, Incapacitated, Pupating, Adults), as.integer)) %>%
+  arrange(CPB.Group, Assay.Day)
+
+# simulate beetle-level life stage progression day by day
+feeding_3_progression_list <- list()
+
+for (group in unique(feeding_3_counts_wide$CPB.Group)) {
+  group_data <- feeding_3_counts_wide %>%
+    filter(CPB.Group == group) %>%
+    arrange(Assay.Day)
+
+  beetles <- tibble(Beetle_ID = 1:10, Stage = rep(1, 10))
+  group_history <- list()
+
+  for (i in seq_len(nrow(group_data))) {
+    day <- group_data[i, ]
+    target_counts <- as.integer(day[c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")])
+    names(target_counts) <- c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")
+
+    remaining <- beetles
+    assigned <- NULL
+
+    for (stage_name in rev(names(life_stage_codes))) {
+      code <- life_stage_codes[stage_name]
+      n_needed <- target_counts[stage_name]
+      eligible <- remaining %>% filter(Stage <= code)
+      selected <- if (nrow(eligible) >= n_needed) slice_head(eligible, n = n_needed) else eligible
+
+      if (nrow(selected) > 0) {
+        selected$Stage <- code
+        assigned <- bind_rows(assigned, selected)
+        remaining <- anti_join(remaining, selected, by = "Beetle_ID")
+      }
+    }
+
+    if (!is.null(assigned)) {
+      day_result <- assigned %>%
+        mutate(
+          CPB.Group = group,
+          Assay.Day = day$Assay.Day,
+          Date = day$Date,
+          Life_Stage = names(life_stage_codes)[Stage]
+        )
+      group_history[[i]] <- day_result
+      beetles <- assigned
+    }
+  }
+
+  feeding_3_progression_list[[group]] <- bind_rows(group_history)
+}
+
+# combine all groups
+feeding_3_beetle_progression <- bind_rows(feeding_3_progression_list) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# build skeleton across all assay days
+max_day <- max(feeding_3_raw$Assay.Day, na.rm = TRUE)
+feeding_3_skeleton <- feeding_3_raw %>%
+  distinct(CPB.Group) %>%
+  crossing(Beetle_ID = 1:10, Assay.Day = 1:max_day)
+
+# fill forward life stage per beetle
+feeding_3_beetle_filled <- feeding_3_skeleton %>%
+  left_join(feeding_3_beetle_progression, by = c("CPB.Group", "Assay.Day", "Beetle_ID")) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day) %>%
+  group_by(CPB.Group, Beetle_ID) %>%
+  fill(Stage, .direction = "down") %>%
+  ungroup() %>%
+  mutate(
+    Life_Stage = names(life_stage_codes)[Stage],
+    Life_Stage = factor(Life_Stage, levels = names(life_stage_codes), ordered = TRUE)
+  )
+
+# final beetle-level progression file
+feeding_3_prog <- feeding_3_beetle_filled %>%
+  select(CPB.Group, Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# assign unique beetle IDs across groups
+unique_beetles <- feeding_3_prog %>%
+  distinct(CPB.Group, Beetle_ID) %>%
+  arrange(CPB.Group, Beetle_ID) %>%
+  mutate(Global_Beetle_ID = row_number())
+
+feeding_3_prog <- feeding_3_prog %>%
+  left_join(unique_beetles, by = c("CPB.Group", "Beetle_ID")) %>%
+  select(CPB.Group, Global_Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  rename(Beetle_ID = Global_Beetle_ID)
+
+# export
+write.csv(feeding_3_prog, "feeding_3_beetle_prog.csv", row.names = FALSE)
+
+
+# generate start–stop transition table
+feeding_3_start_stop <- feeding_3_prog %>%
+  arrange(Beetle_ID, Assay.Day) %>%
+  group_by(Beetle_ID) %>%
+  mutate(
+    stage_change = Stage != lag(Stage, default = first(Stage)),
+    run_id = cumsum(stage_change)
+  ) %>%
+  group_by(Beetle_ID, run_id) %>%
+  summarise(
+    CPB.Group = first(CPB.Group),
+    from = first(Stage),
+    start = min(Assay.Day),
+    stop = max(Assay.Day) + 1,
+    .groups = "drop"
+  ) %>%
+  group_by(Beetle_ID) %>%
+  mutate(to = lead(from)) %>%
+  ungroup() %>%
+  select(-run_id)
+
+# export final feeding transitions
+write_csv(feeding_3_start_stop, "feeding_3_start-stop.csv")
+
+head(feeding_3_start_stop)
+
+```
+
+```{r semi-markov feeding 3rd}
+# libraries
+library(readr)
+library(dplyr)
+library(stringr)
+library(survival)
+library(ggplot2)
+library(emmeans)
+
+# read in feeding_3 data
+feeding_3_start_stop <- read_csv("feeding_3_start-stop.csv")
+beetle_stages <- feeding_3_start_stop
+
+# split treatment & replicate
+split_cols <- as.data.frame(str_split_fixed(beetle_stages$CPB.Group, "[.]", 2))
+colnames(split_cols) <- c("treatment", "rep")
+beetle_stages_appended <- cbind(beetle_stages, split_cols)
+
+# add Bt (time in current state)
+beetle_stages_appended$Bt <- beetle_stages_appended$stop - beetle_stages_appended$start
+
+# define reusable function for stage-to-stage Cox models
+multi_stage_model <- function(from_stage, to_stage, df_in = beetle_stages_appended, quad_3_4_flag = 1) {
+  model_df <- df_in %>%
+    filter(from == from_stage) %>%
+    select(Beetle_ID, treatment, rep, from, to, start, stop, Bt) %>%
+    mutate(to_for_status = to_stage,
+           status = ifelse(to_for_status == to, 1, 0),
+           status = ifelse(is.na(status), 0, status)) %>%
+    select(-to) %>%
+    rename(to = to_for_status)
+
+  if (from_stage == 1) {
+    model <- coxph(Surv(start, stop, status) ~ treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model starts from stage 1, no Bt term.")
+  } else if ((from_stage == 3) & (to_stage == 4) & (quad_3_4_flag == 1)) {
+    model <- coxph(Surv(start, stop, status) ~ Bt + I(Bt^2) + treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model includes Bt and Bt² (quadratic term).")
+  } else {
+    model <- coxph(Surv(start, stop, status) ~ Bt + treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model includes Bt term.")
+  }
+
+  return(list(model = model, model_df = model_df))
+}
+
+# run key transition models
+model_1_to_2 <- multi_stage_model(1, 2) #no Bt term
+model_1_to_3 <- multi_stage_model(1, 3) #no Bt term
+#model_2_to_5 <- multi_stage_model(2, 5) #no observations
+model_3_to_4 <- multi_stage_model(3, 4)
+model_3_to_5 <- multi_stage_model(3, 5)
+model_4_to_5 <- multi_stage_model(4, 5)
+
+# view summaries
+summary(model_1_to_2$model) #no data
+summary(model_1_to_3$model)
+#summary(model_2_to_5$model) #data here for some reason
+summary(model_3_to_4$model)
+summary(model_3_to_5$model)
+summary(model_4_to_5$model)
+
+# visualization
+model_3_to_4$model_df %>%
+  mutate(duration = stop - start) %>%
+  ggplot(aes(x = treatment, y = duration, color = as.factor(status))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0)) +
+  theme_bw() +
+  labs(title = "Stage 3 → 4 Duration by Treatment", y = "Days in Stage", x = "Treatment")
+
+model_1_to_2$model
+model_1_to_3$model
+#model_2_to_5$model
+#model_3_to_2$model
+model_3_to_4$model
+model_3_to_5$model
+#model_4_to_2$model
+model_4_to_5$model
+
+# visualizations
+library(ggplot2)
+
+plot_transition <- function(model_obj, from_stage, to_stage) {
+  model_obj$model_df %>%
+    ggplot(aes(x = Bt, y = status, color = treatment)) +
+    geom_jitter(width = 0.2, height = 0.05, alpha = 0.7) +
+    theme_bw(base_size = 13) +
+    labs(
+      title = paste0("Stage ", from_stage, " → ", to_stage, 
+                     ": Time in Stage vs Transition Probability"),
+      y = "Transition occurred (status = 1)",
+      x = "Time spent in stage (Bt)"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+# run for all relevant models
+plot_transition(model_1_to_3, 1, 3)
+#plot_transition(model_2_to_5, 2, 5)
+plot_transition(model_3_to_4, 3, 4)
+plot_transition(model_3_to_5, 3, 5)
+plot_transition(model_4_to_5, 4, 5)
+
+
+
+# treatment comparisons
+library(emmeans)
+
+compare_treatments <- function(model_obj, from_stage, to_stage) {
+  cat("\n--- Pairwise treatment contrasts for Stage", from_stage, "→", to_stage, "---\n")
+  EMM <- emmeans(model_obj$model, "treatment")
+  print(EMM)
+  print(pairs(EMM, adjust = "none"))
+}
+
+
+compare_treatments(model_1_to_3, 1, 3)
+#compare_treatments(model_2_to_5, 2, 5)
+compare_treatments(model_3_to_4, 3, 4)
+compare_treatments(model_3_to_5, 3, 5)
+compare_treatments(model_4_to_5, 4, 5)
+
+# treatment level summary
+beetle_stages_appended <- beetle_stages %>%
+  mutate(
+    # 4-char treatment code: 3FC1, 3FC3, 3GD1, 3GD2, 3LD1, 3LD2
+    treatment = substr(CPB.Group, 1, 4),
+    # replicate label (if any)
+    rep       = substr(CPB.Group, 5, nchar(CPB.Group)),
+    # time in state
+    Bt        = stop - start,
+    # factors
+    treatment = factor(treatment),
+    rep       = factor(rep)
+  )
+
+model_1_to_2 <- multi_stage_model(1, 2)
+model_1_to_3 <- multi_stage_model(1, 3)
+#model_2_to_5 <- multi_stage_model(2, 5)
+model_3_to_4 <- multi_stage_model(3, 4)
+model_3_to_5 <- multi_stage_model(3, 5)
+model_4_to_5 <- multi_stage_model(4, 5)
+
+summary(model_3_to_4$model)
+levels(model_3_to_4$model_df$treatment)
+
+```
+
+```{r feeding 4th data transform}
+# libraries
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(stringr)
+
+# load and clean raw feeding_4 data 
+feeding_4_raw <- read.csv("feeding_4th.csv") %>%
+  select(-`Weight..g.`, -`X..Defoliation`, -Notes, -GroupCore, -Instar, 
+         -avg_beetle_weight, -defol_corrected, -GroupPrefix, -Adults) %>%  # remove duplicate Adults col
+  rename(Adults = `Emerged.Adults`,
+         Assay.Day = Assay_Day,
+         CPB.Group = CPB_Group)
+
+# pivot life stage columns to long format
+feeding_4_long <- feeding_4_raw %>%
+  pivot_longer(
+    cols = c(Alive, Dead, Incapacitated, Pupating, Adults),
+    names_to = "Life_Stage",
+    values_to = "Count"
+  )
+
+# expand each row so each beetle is a separate row
+feeding_4_expanded <- feeding_4_long %>%
+  mutate(Count = replace_na(Count, 0)) %>%
+  filter(Count > 0) %>%
+  uncount(weights = Count)
+
+# define numeric life stage codes
+life_stage_codes <- c(
+  Alive = 1,
+  Incapacitated = 2,
+  Pupating = 3,
+  Adults = 4,
+  Dead = 5
+)
+
+# prepare wide-format daily counts
+feeding_4_counts_wide <- feeding_4_raw %>%
+  mutate(across(c(Alive, Dead, Incapacitated, Pupating, Adults), as.integer)) %>%
+  arrange(CPB.Group, Assay.Day)
+
+# simulate beetle-level life stage progression day by day
+feeding_4_progression_list <- list()
+
+for (group in unique(feeding_4_counts_wide$CPB.Group)) {
+  group_data <- feeding_4_counts_wide %>%
+    filter(CPB.Group == group) %>%
+    arrange(Assay.Day)
+
+  beetles <- tibble(Beetle_ID = 1:10, Stage = rep(1, 10))
+  group_history <- list()
+
+  for (i in seq_len(nrow(group_data))) {
+    day <- group_data[i, ]
+    target_counts <- as.integer(day[c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")])
+    target_counts[is.na(target_counts)] <- 0  # ✅ fix: replace NAs with 0
+    names(target_counts) <- c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")
+
+    remaining <- beetles
+    assigned <- NULL
+
+    for (stage_name in rev(names(life_stage_codes))) {
+      code <- life_stage_codes[stage_name]
+      n_needed <- target_counts[stage_name]
+      eligible <- remaining %>% filter(Stage <= code)
+      selected <- if (nrow(eligible) >= n_needed) slice_head(eligible, n = n_needed) else eligible
+
+      if (nrow(selected) > 0) {
+        selected$Stage <- code
+        assigned <- bind_rows(assigned, selected)
+        remaining <- anti_join(remaining, selected, by = "Beetle_ID")
+      }
+    }
+
+    if (!is.null(assigned)) {
+      day_result <- assigned %>%
+        mutate(
+          CPB.Group = group,
+          Assay.Day = day$Assay.Day,
+          Date = day$Date,
+          Life_Stage = names(life_stage_codes)[Stage]
+        )
+      group_history[[i]] <- day_result
+      beetles <- assigned
+    }
+  }
+
+  feeding_4_progression_list[[group]] <- bind_rows(group_history)
+}
+
+# combine all beetles across groups
+feeding_4_beetle_progression <- bind_rows(feeding_4_progression_list) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# build skeleton across all assay days
+max_day <- max(feeding_4_raw$Assay.Day, na.rm = TRUE)
+feeding_4_skeleton <- feeding_4_raw %>%
+  distinct(CPB.Group) %>%
+  crossing(Beetle_ID = 1:10, Assay.Day = 1:max_day)
+
+# fill forward life stage per beetle
+feeding_4_beetle_filled <- feeding_4_skeleton %>%
+  left_join(feeding_4_beetle_progression, by = c("CPB.Group", "Assay.Day", "Beetle_ID")) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day) %>%
+  group_by(CPB.Group, Beetle_ID) %>%
+  fill(Stage, .direction = "down") %>%
+  ungroup() %>%
+  mutate(
+    Life_Stage = names(life_stage_codes)[Stage],
+    Life_Stage = factor(Life_Stage, levels = names(life_stage_codes), ordered = TRUE)
+  )
+
+# final beetle-level progression file
+feeding_4_prog <- feeding_4_beetle_filled %>%
+  select(CPB.Group, Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# assign unique beetle IDs across groups
+unique_beetles <- feeding_4_prog %>%
+  distinct(CPB.Group, Beetle_ID) %>%
+  arrange(CPB.Group, Beetle_ID) %>%
+  mutate(Global_Beetle_ID = row_number())
+
+feeding_4_prog <- feeding_4_prog %>%
+  left_join(unique_beetles, by = c("CPB.Group", "Beetle_ID")) %>%
+  select(CPB.Group, Global_Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  rename(Beetle_ID = Global_Beetle_ID)
+
+# export
+write.csv(feeding_4_prog, "feeding_4_beetle_prog.csv", row.names = FALSE)
+
+# FIX: Merge corrected C1 developmental data
+feeding_4_C1 <- read_csv("feeding_4_C1_corrected.csv")
+
+feeding_4_fixed <- feeding_4_prog %>%
+  filter(!str_detect(CPB.Group, "^C1")) %>%   # remove corrupted C1
+  bind_rows(feeding_4_C1) %>%                 # add corrected version
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+feeding_4_fixed %>%
+  filter(str_detect(CPB.Group, "^C1")) %>%
+  count(Stage) %>%
+  arrange(Stage)
+
+# export fixed progression for modeling
+write_csv(feeding_4_fixed, "feeding_4_beetle_prog_fixed.csv")
+
+
+
+# build start–stop transition table
+feeding_4_start_stop <- feeding_4_prog %>%
+  arrange(Beetle_ID, Assay.Day) %>%
+  group_by(Beetle_ID) %>%
+  mutate(
+    stage_change = Stage != lag(Stage, default = first(Stage)),
+    run_id = cumsum(stage_change)
+  ) %>%
+  group_by(Beetle_ID, run_id) %>%
+  summarise(
+    CPB.Group = first(CPB.Group),
+    from = first(Stage),
+    start = min(Assay.Day),
+    stop = max(Assay.Day) + 1,
+    .groups = "drop"
+  ) %>%
+  group_by(Beetle_ID) %>%
+  mutate(to = lead(from)) %>%
+  ungroup() %>%
+  select(-run_id)
+
+# export final transitions
+write_csv(feeding_4_start_stop, "feeding_4_start-stop.csv")
+
+head(feeding_4_start_stop)
+
+```
+
+```{r semi-markov feeding 4th}
+# Semi-Markov Development Models — Feeding 4th Dataset
+
+# load libraries
+library(readr)
+library(dplyr)
+library(stringr)
+library(survival)
+library(ggplot2)
+library(emmeans)
+
+# read in feeding_4 data
+feeding_4 <- read_csv("feeding_4_start-stop.csv")
+
+# split treatment & replicate from CPB.Group 
+split_cols_4 <- as.data.frame(str_split_fixed(feeding_4$CPB.Group, "[.]", 2))
+colnames(split_cols_4) <- c("treatment", "rep")
+
+# append and compute Bt (time in state)
+beetle_stages_4_appended <- cbind(feeding_4, split_cols_4) %>%
+  mutate(Bt = stop - start)
+
+# add Bt (time in current state)
+beetle_stages_4_appended$Bt <- beetle_stages_4_appended$stop - beetle_stages_4_appended$start
+
+# define reusable function for stage-to-stage Cox models
+multi_stage_model_4 <- function(from_stage, to_stage, df_in = beetle_stages_4_appended, quad_3_4_flag = 1) {
+  model_df <- df_in %>%
+    filter(from == from_stage) %>%
+    select(Beetle_ID, treatment, rep, from, to, start, stop, Bt) %>%
+    mutate(to_for_status = to_stage,
+           status = ifelse(to_for_status == to, 1, 0),
+           status = ifelse(is.na(status), 0, status)) %>%
+    select(-to) %>%
+    rename(to = to_for_status)
+
+  if (from_stage == 1) {
+    model <- coxph(Surv(start, stop, status) ~ treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model starts from stage 1, no Bt term.")
+  } else if ((from_stage == 3) & (to_stage == 4) & (quad_3_4_flag == 1)) {
+    model <- coxph(Surv(start, stop, status) ~ Bt + I(Bt^2) + treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model includes Bt and Bt² (quadratic term).")
+  } else {
+    model <- coxph(Surv(start, stop, status) ~ Bt + treatment,
+                   data = model_df,
+                   subset = ((from == from_stage) & (to == to_stage)))
+    message("Note: Model includes Bt term.")
+  }
+
+  return(list(model = model, model_df = model_df))
+}
+
+# run key transition models
+model_4th_1_to_2 <- multi_stage_model_4(1, 2)
+model_4th_1_to_3 <- multi_stage_model_4(1, 3)
+model_4th_2_to_5 <- multi_stage_model_4(2, 5)
+#model_4th_3_to_4 <- multi_stage_model_4(3, 4)
+model_4th_3_to_5 <- multi_stage_model_4(3, 5)
+model_4th_4_to_5 <- multi_stage_model_4(4, 5)
+
+model_4th_1_to_2$model
+model_4th_1_to_3$model
+model_4th_2_to_5$model
+#model_4th_3_to_2$model
+#model_4th_3_to_4$model
+model_4th_3_to_5$model
+#model_4th_4_to_2$model
+model_4th_4_to_5$model
+
+# view summaries
+summary(model_4th_1_to_2$model)
+summary(model_4th_1_to_3$model)
+summary(model_4th_2_to_5$model)
+#summary(model_4th_3_to_4$model)
+summary(model_4th_3_to_5$model)
+summary(model_4th_4_to_5$model)
+
+plot_transition_4 <- function(model_obj, from_stage, to_stage) {
+  model_obj$model_df %>%
+    ggplot(aes(x = Bt, y = status, color = treatment)) +
+    geom_jitter(width = 0.2, height = 0.05, alpha = 0.7) +
+    theme_bw(base_size = 13) +
+    labs(
+      title = paste0("Feeding-4th Stage ", from_stage, " → ", to_stage,
+                     ": Time in Stage vs Transition Probability"),
+      y = "Transition occurred (status = 1)",
+      x = "Time spent in stage (Bt)"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+plot_transition_4(model_4th_1_to_3, 1, 3)
+plot_transition_4(model_4th_2_to_5, 2, 5)
+#plot_transition_4(model_4th_3_to_4, 3, 4)
+plot_transition_4(model_4th_3_to_5, 3, 5)
+plot_transition_4(model_4th_4_to_5, 4, 5)
+
+# pairwise treatment comparisons
+compare_treatments_4 <- function(model_obj, from_stage, to_stage) {
+  cat("\n--- Pairwise treatment contrasts for Feeding-4th Stage", from_stage, "→", to_stage, "---\n")
+  EMM <- emmeans(model_obj$model, "treatment")
+  print(EMM)
+  print(pairs(EMM, adjust = "none"))  # or "tukey" for adjusted
+}
+
+compare_treatments_4(model_4th_1_to_3, 1, 3)
+compare_treatments_4(model_4th_2_to_5, 2, 5)
+#compare_treatments_4(model_4th_3_to_4, 3, 4)
+compare_treatments_4(model_4th_3_to_5, 3, 5)
+compare_treatments_4(model_4th_4_to_5, 4, 5)
+
+# corrected 3-->4 model
+library(dplyr)
+
+# construct a stage-3 dataset with status for 3→4
+stage34_df <- beetle_stages_4_appended %>%
+  filter(from == 3) %>%
+  mutate(
+    Bt = stop - start,
+    status = ifelse(to == 4, 1, 0),
+    status = ifelse(is.na(status), 0, status)
+  )
+
+# count events by treatment for 3→4
+events_34 <- stage34_df %>%
+  group_by(treatment) %>%
+  summarise(
+    n = n(),
+    events_3_to_4 = sum(status),
+    .groups = "drop"
+  )
+
+events_34
+# -> check this to see which treatments have 0 events
+
+# keep only treatments with at least one 3→4 event
+keep_treatments_34 <- events_34 %>%
+  filter(events_3_to_4 > 0) %>%
+  pull(treatment)
+
+keep_treatments_34
+
+# filter the full feeding-4th dataset to those treatments (for all from-stages)
+beetle_stages_4_reduced <- beetle_stages_4_appended %>%
+  filter(treatment %in% keep_treatments_34)
+
+# refit the 3→4 semi-Markov model using the reduced dataset
+model_4th_3_to_4_reduced <- multi_stage_model_4(
+  from_stage = 3,
+  to_stage   = 4,
+  df_in      = beetle_stages_4_reduced,
+  quad_3_4_flag = 1  # keep Bt + Bt^2
+)
+
+summary(model_4th_3_to_4_reduced$model)
+
+```
