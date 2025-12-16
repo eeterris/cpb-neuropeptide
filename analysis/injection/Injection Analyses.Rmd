@@ -17,12 +17,12 @@ library(lme4)
 library(betareg)
 library(survival)
 library(survminer)
+library(here)
+knitr::opts_knit$set(root.dir = here::here())
 ```
 
 ```{r load and clean data}
-GPA2_LGR1_Injection_Trial <- read_csv("Injection Trial Data.csv")
-
-injection <- GPA2_LGR1_Injection_Trial
+injection <- readr::read_csv(here("data", "inputs", "injection_trial_data.csv"))
 
 injection <- injection %>%
   rename(
