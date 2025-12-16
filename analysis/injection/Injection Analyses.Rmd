@@ -1,0 +1,1108 @@
+---
+title: "Injection Data Analysis Code for Public Use"
+author: "Emma"
+date: "2025-12-15"
+output: html_document
+---
+
+```{r library loading}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(stringr)
+library(mgcv)
+library(ggplot2)
+library(lmtest)
+library(lme4)
+library(betareg)
+library(survival)
+library(survminer)
+```
+
+```{r load and clean data}
+GPA2_LGR1_Injection_Trial <- read_csv("Injection Trial Data.csv")
+
+injection <- GPA2_LGR1_Injection_Trial
+
+injection <- injection %>%
+  rename(
+    Assay_Day = `Assay Day`,
+    CPB_Group = `CPB Group`,
+    Defoliation = `% Defoliation`
+  )
+
+# average beetle weight & sd in each rep 
+injection <- injection %>%
+  mutate(
+    GroupPrefix = str_extract(CPB_Group, "^[^\\.]+"),
+    `Weight (g)` = as.numeric(`Weight (g)`),
+    Defoliation = as.numeric(Defoliation),
+    avg_beetle_weight = ifelse(Alive > 0, `Weight (g)` / Alive, NA),
+    defol_per_beetle = ifelse(Alive > 0, Defoliation / Alive, NA)
+  )
+
+# summarize by GroupPrefix
+injection_group_summary <- injection %>%
+  group_by(GroupPrefix) %>%
+  summarize(
+    n_reps = n(),
+    mean_avg_beetle_weight = mean(avg_beetle_weight, na.rm = TRUE),
+    sd_avg_beetle_weight = sd(avg_beetle_weight, na.rm = TRUE),
+    mean_defol_per_beetle = mean(defol_per_beetle, na.rm = TRUE),
+    sd_defol_per_beetle = sd(defol_per_beetle, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# join group summary back into dish-level data
+injection <- injection %>%
+  left_join(injection_group_summary, by = "GroupPrefix", suffix = c("", "_GroupAvg"))
+
+# extract prefix and assign treatments for Injection Trial
+injection <- injection %>%
+  mutate(GroupPrefix = str_extract(CPB_Group, "^[^\\.]+")) %>%
+  mutate(Treatment = case_when(
+    GroupPrefix == "C1" ~ "Control_Uninjected",
+    GroupPrefix == "C2" ~ "Control_H2O",
+    GroupPrefix == "C3" ~ "Control_dsRNA",
+    GroupPrefix == "GD1" ~ "GPA2_Low",
+    GroupPrefix == "GD2" ~ "GPA2_High",
+    GroupPrefix == "LD1" ~ "LGR1_Low",
+    GroupPrefix == "LD2" ~ "LGR1_High",
+    TRUE ~ "Other"
+  ))
+
+table(injection$Treatment)
+
+injection <- injection %>%
+  mutate(Treatment = relevel(factor(Treatment), ref = "Control_Uninjected"))
+
+```
+
+# Weight Analyses:
+
+```{r compare model fits for weight}
+# let's compare four fits - linear, quadratic, quartic, and means at different points
+
+# model 1: linear------------------------------------------------------
+lmm_injection <- lmer(avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group), data = injection)
+summary(lmm_injection)
+anova(lmm_injection)
+
+par(mfrow = c(2,2))
+plot(lmm_injection)
+
+# linear visualization
+injection %>% 
+  ggplot(aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) + 
+  geom_point() +
+  xlim(c(0,8)) + 
+  # geom_line()
+  # geom_smooth(se = F)
+  geom_smooth(method = "lm", se = F)
+
+injection %>% 
+  ggplot(aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) + 
+  geom_point() +
+  xlim(c(0,8))
+
+# loess visualization
+injection %>% 
+  ggplot(aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) + 
+  geom_point() +
+  xlim(c(0,8)) + 
+  # geom_line()
+  # geom_smooth(se = F)
+  geom_smooth( se = F, lwd = 0.25)
+
+# model 2: quadratic------------------------------------------------------
+lmm_quad_injection <- lmer(avg_beetle_weight ~ Treatment *  (Assay_Day + I(Assay_Day^2)) + (1 | CPB_Group) + (1 | CPB_Group), data = injection)
+summary(lmm_quad_injection)
+anova(lmm_quad_injection)
+
+plot(lmm_quad_injection)
+
+# model 3: quartic------------------------------------------------------
+lmm_quartic_injection <- lmer(avg_beetle_weight ~ Treatment *   (Assay_Day + I(Assay_Day^2) + I(Assay_Day^3) + I(Assay_Day^4)) + (1 | CPB_Group), data = injection)
+summary(lmm_quartic_injection)
+anova(lmm_quartic_injection)
+
+plot(lmm_quartic_injection)
+
+# model 4: time as factor------------------------------------------------------
+lmm_time_factor_injection <- lmer(avg_beetle_weight ~ Treatment *  as.factor(Assay_Day) + (1 | CPB_Group), data = injection)
+summary(lmm_time_factor_injection)
+anova(lmm_time_factor_injection)
+
+plot(lmm_time_factor_injection)
+
+# time as factor visualization
+injection %>% 
+  ggplot(aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) + 
+  geom_point() + 
+  geom_line() + 
+  xlim(c(0,8))
+
+# model 5: non-linear------------------------------------------------------
+nonlinear_ls_model <-
+  nls(avg_beetle_weight ~ 1 - exp(-alpha*((Assay_Day)^2)),
+      data = injection,
+      start = list(alpha = 1))
+summary(nonlinear_ls_model)
+
+plot(nonlinear_ls_model)
+
+# it appears that a polynomial model is a poor fit, and a linear model is too simple
+
+# compare the BICs, the lowest BIC is best
+paste0("Linear model BIC is ", BIC(lmm_injection))
+paste0("Quadratic model BIC is ", BIC(lmm_quad_injection))
+paste0("Quartic model BIC is ", BIC(lmm_quartic_injection))
+paste0("Time as factor model BIC is ", BIC(lmm_time_factor_injection))
+paste0("Linear model BIC is ", BIC(nonlinear_ls_model))
+
+# model 6: GAM------------------------------------------------------
+gam_injection_model <-  gam(avg_beetle_weight ~ CPB_Group+s(Assay_Day, k = 3), data = injection)
+
+BIC(gam_injection_model)
+
+# add predictions to original dataset
+injection <- injection %>%
+  mutate(prediction_gam = predict(gam_injection_model, newdata = injection))
+
+# plot observed and predicted values
+ggplot(injection, aes(x = Assay_Day, y = avg_beetle_weight, color = Treatment, group = CPB_Group)) +
+  geom_point() +
+  geom_line(aes(y = prediction_gam)) +
+  xlim(0, 8) +
+  labs(title = "GAM Fit: Avg Beetle Weight over Time", y = "Avg Beetle Weight (g)") +
+  theme_minimal()
+
+# This seems to fit the data well. There is probably a way to make this slightly better
+# by adjusting the number of knots (k), or considering different basis functions.
+# Cubic splines are slightly more interpretable. 
+
+# We need to sort the data in order of CBP Group, then Date.
+# This will not change the model, but will enable us to do a Durbin-Watson test
+
+injection_gam_sort <- injection %>% group_by(CPB_Group, Assay_Day) %>% 
+  arrange(CPB_Group, Assay_Day) %>% 
+  filter(!is.na(avg_beetle_weight))
+
+gam_injection_model_2 <-  gam(avg_beetle_weight ~ CPB_Group+s(Assay_Day, k = 3), data = injection_gam_sort)
+
+dwtest(gam_injection_model_2$residuals ~ 1)
+
+# DW ~ 2.00, so no autocorrelation in residuals and non-signficant p-value so we fail to reject the null hypothesis of no autocorrelation
+```
+
+```{r test for significance of variables in weight}
+# now we move on to testing for significant differences in weight over time between treatment groups
+
+# model 1: full parametruc using REML
+lmm_reml_inj <- lmer(
+  avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group),
+  data = injection,
+  REML = TRUE  #default: gives unbiased estimates of random effects
+)
+
+# model 1: full parametruc using REML
+lmm_ml_inj <- lmer(
+  avg_beetle_weight ~ Treatment * Assay_Day + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE  #default: gives unbiased estimates of random effects
+)
+
+summary(lmm_reml_inj)
+summary(lmm_ml_inj)
+
+# refit the model using ML (REML = FALSE) becuase it is required for comparing models using anova
+# lmm_ml_inj <- update(lmm_reml, REML = FALSE)
+
+# model 2: nested/reduced model with ML
+    #remove fixed effects or interaction terms to test their significance
+lmm_reduced_ml_inj <- lmer(
+  avg_beetle_weight ~ Treatment + Assay_Day + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+# compare models using Likelihood Ratio Test (LRT)
+anova(lmm_reduced_ml_inj, lmm_ml_inj)
+
+# model 3: nested/reduced model with ML
+    #remove fixed effects or interaction terms to test their significance
+lmm_reduced_ml_noday <- lmer(
+  avg_beetle_weight ~ Treatment + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+anova(lmm_reduced_ml_noday, lmm_ml_inj)
+
+# model 4: nested/reduced model with ML
+    #remove fixed effects or interaction terms to test their significance
+lmm_reduced_ml_notreatment <- lmer(
+  avg_beetle_weight ~ Assay_Day + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+anova(lmm_reduced_ml_notreatment, lmm_ml_inj)
+
+anova(lmm_reduced_ml_notreatment, lmm_reduced_ml_inj)
+
+summary(lmm_reml_inj)
+```
+
+```{r visualizations for weight}
+injection_palette <- c(
+  "Control_Uninjected" = "#A8E6A3",
+  "Control_H2O"        = "#81C784",
+  "Control_dsRNA"      = "#4CAF50",
+  "GPA2_Low"           = "#81D4FA",
+  "GPA2_High"          = "#0288D1",
+  "LGR1_Low"           = "#CE93D8",
+  "LGR1_High"          = "#8E24AA"
+)
+
+injection_gam_sort <- injection_gam_sort %>%
+  select(-Treatment) %>%  # remove broken NA column, just in case
+  left_join(
+    injection %>% select(CPB_Group, Treatment) %>% distinct(),
+    by = "CPB_Group"
+  )
+
+injection_gam_sort$Treatment <- factor(injection_gam_sort$Treatment, levels = names(injection_palette))
+
+# summary for treatment-level mean and SE
+inj_gam_weight_summary <- injection_gam_sort %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(prediction_gam, na.rm = TRUE),
+    se_pred = sd(prediction_gam, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+inj_gam_weight_summary$Treatment <- factor(inj_gam_weight_summary$Treatment, levels = names(injection_palette))
+injection_gam_sort$Treatment <- factor(injection_gam_sort$Treatment, levels = names(injection_palette))
+
+ggplot(inj_gam_weight_summary, aes(x = Assay_Day, y = mean_pred)) +
+  geom_ribbon(aes(fill = Treatment, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred),
+              alpha = 0.2, color = NA) +
+  geom_line(aes(color = Treatment), size = 1.2) +
+  scale_color_manual(values = injection_palette) +
+  scale_fill_manual(values = injection_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Predicted Avg Beetle Weight (g)",
+    title = "Weight Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+# plot individaul lines per treatment
+injection$Treatment <- factor(injection$Treatment, levels = names(injection_palette))
+inj_gam_weight_summary$Treatment <- factor(inj_gam_weight_summary$Treatment, levels = names(injection_palette))
+
+ggplot() +
+  geom_line(
+    data = injection %>%
+      filter(Assay_Day <= max(inj_gam_weight_summary$Assay_Day)),
+    aes(x = Assay_Day, y = prediction_gam, group = CPB_Group, color = Treatment),
+    alpha = 0.3,
+    size = 0.6
+  ) +
+  geom_ribbon(
+    data = inj_gam_weight_summary,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2,
+    color = NA
+  ) +
+  geom_line(
+    data = inj_gam_weight_summary,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(
+    values = injection_palette,
+    aesthetics = c("color", "fill")
+  ) +
+  labs(
+    x = "Assay Day",
+    y = "Average Beetle Weight (g)",
+    title = "Weight Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+```
+
+# Defoliation Analyses:
+
+```{r compare model fits for defoliation}
+# center time variable
+injection <- injection %>%
+  mutate(Assay_Day_c = scale(Assay_Day, center = TRUE, scale = FALSE))
+
+# linear
+lmm_defol_linear_inj <- lmer(Defoliation ~ Treatment * Assay_Day_c + Alive + (1 | CPB_Group), data = injection)
+
+# quadratic
+lmm_defol_quad_inj <- lmer(Defoliation ~ Treatment * (Assay_Day_c + I(Assay_Day_c^2)) + Alive + (1 | CPB_Group), data = injection)
+
+# quartic
+lmm_defol_quartic_inj <- lmer(Defoliation ~ Treatment * (Assay_Day_c + I(Assay_Day_c^2) + I(Assay_Day_c^3) + I(Assay_Day_c^4)) + Alive + (1 | CPB_Group), data = injection)
+
+# time as factor
+lmm_defol_time_factor_inj <- lmer(Defoliation ~ Treatment * as.factor(Assay_Day) + Alive + (1 | CPB_Group), data = injection)
+
+# GAM
+injection$CPB_Group <- as.factor(injection$CPB_Group)
+
+gam_defol_inj <- gam(
+  Defoliation ~ Treatment + s(Assay_Day, by = Treatment, k = 7) + Alive + s(CPB_Group, bs = "re"),
+  data = injection
+)
+
+gam_defol2_inj <- gam(
+  Defoliation ~ Treatment + s(Assay_Day, by = Treatment, k = 4) + Alive + s(CPB_Group, bs = "re"),
+  data = injection
+)
+
+# non-linear least squares
+nls_defol_inj <- nls(
+  Defoliation ~ Asym * (1 - exp(-k * Assay_Day)),
+  data = injection,
+  start = list(Asym = 80, k = 1),
+  control = nls.control(minFactor = 1e-10, warnOnly = TRUE)
+)
+
+# beta regression
+injection <- injection %>%
+  mutate(defol_01 = (Defoliation + 0.001) / 100.002) #standard fix for this regression, Smithson & Verkuilen adjustment I think?
+
+beta_defol_inj <- betareg(defol_01 ~ Treatment * Assay_Day + Alive, data = injection)
+summary(beta_defol_inj)
+
+# compare BICs across the models
+cat("Linear BIC:", BIC(lmm_defol_linear_inj), "\n") #1868.854
+cat("Quadratic BIC:", BIC(lmm_defol_quad_inj), "\n") #1846.146
+cat("Quartic BIC:", BIC(lmm_defol_quartic_inj), "\n") #1822.12
+cat("Time-as-factor BIC:", BIC(lmm_defol_time_factor_inj), "\n") #1655.63
+cat("GAM BIC:", BIC(gam_defol_inj), "\n") #1787.931
+cat("GAM2 BIC:", BIC(gam_defol2_inj), "\n") #1787.357
+cat("NLS BIC:", BIC(nls_defol_inj), "\n") #2005.965
+cat("Beta BIC:", BIC(beta_defol_inj), "\n") #-973.7633
+
+# Time-as-factor is the best parametric model but Beta-Regression performed best by absolute BIC. Testing for signifcance with Time-as-factor and will vosualize both to see which represents the data better.
+
+# compare simple and complex models
+# full interaction model
+lmm_defol_tf_full <- lmer(
+  Defoliation ~ Treatment * as.factor(Assay_Day) + Alive + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+# additive model (no interaction)
+lmm_defol_tf_add <- lmer(
+  Defoliation ~ Treatment + as.factor(Assay_Day) + Alive + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+# treatment-only model
+lmm_defol_tf_treat <- lmer(
+  Defoliation ~ Treatment + Alive + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+# day-only model
+lmm_defol_tf_day <- lmer(
+  Defoliation ~ as.factor(Assay_Day) + Alive + (1 | CPB_Group),
+  data = injection,
+  REML = FALSE
+)
+
+# likelihood ratio tests
+# test for interaction 
+anova(lmm_defol_tf_add, lmm_defol_tf_full)
+    #defoliation patterns vary over time depending on treatment
+
+# test for day effect
+anova(lmm_defol_tf_treat, lmm_defol_tf_full)
+    #defoliation changes significantly over days, no matter the treatment
+
+# test for treatment effect
+anova(lmm_defol_tf_day, lmm_defol_tf_full)
+    #defoliation differs between treatments
+
+# test for treatment effect in additive model
+anova(lmm_defol_tf_day, lmm_defol_tf_add)
+    #treatment not significant once day is included
+    #treatment differences emerge bexause of different time trajectories, not as constant offsets
+
+##use REML = TRUE for reporting
+```
+
+```{r visaulizations for defoliation}
+# defoliation: time-as-factor
+inj_timeasfactor_data <- model.frame(lmm_defol_time_factor_inj)
+
+inj_timeasfactor_data$predicted_defol <- predict(lmm_defol_time_factor_inj)
+
+inj_timeasfactor_data <- inj_timeasfactor_data %>%
+  rename(Assay_Day = `as.factor(Assay_Day)`) %>%
+  mutate(Assay_Day = as.numeric(as.character(Assay_Day)))
+
+inj_timeasfactor_summary <- inj_timeasfactor_data %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(predicted_defol, na.rm = TRUE),
+    se_pred = sd(predicted_defol, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+inj_timeasfactor_data$Treatment <- factor(inj_timeasfactor_data$Treatment,
+  levels = names(injection_palette)
+)
+
+inj_timeasfactor_summary$Treatment <- factor(inj_timeasfactor_summary$Treatment,
+  levels = names(injection_palette)
+)
+
+ggplot(inj_timeasfactor_summary, aes(x = Assay_Day, y = mean_pred, color = Treatment, fill = Treatment)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = mean_pred - se_pred, ymax = mean_pred + se_pred), alpha = 0.2, color = NA) +
+  scale_color_manual(values = injection_palette) +
+  scale_fill_manual(values = injection_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Model-Predicted Defoliation (%)",
+    title = "Defoliation Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+# plot: model predictions with raw data points
+ggplot(inj_timeasfactor_summary, aes(x = Assay_Day, y = mean_pred, color = Treatment, fill = Treatment)) +
+  # raw data points
+  geom_jitter(
+    data = inj_timeasfactor_data,
+    aes(x = Assay_Day, y = Defoliation, color = Treatment),
+    alpha = 0.3,
+    width = 0.2,
+    size = 1,
+    inherit.aes = FALSE
+  ) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = mean_pred - se_pred, ymax = mean_pred + se_pred),
+              alpha = 0.2, color = NA) +
+  scale_color_manual(values = injection_palette) +
+  scale_fill_manual(values = injection_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Defoliation (%)",
+    title = "Defoliation Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+# individual dish lines per treatment
+ggplot() +
+  geom_line(
+    data = inj_timeasfactor_data,
+    aes(x = Assay_Day, y = predicted_defol, group = CPB_Group, color = Treatment),
+    alpha = 0.3,
+    size = 0.6
+  ) +
+  geom_ribbon(
+    data = inj_timeasfactor_summary,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2,
+    color = NA
+  ) +
+  geom_line(
+    data = inj_timeasfactor_summary,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  
+  # palette and labels
+  scale_color_manual(values = injection_palette) +
+  scale_fill_manual(values = injection_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Defoliation (%)",
+    title = "Defoliation Over Time by Treatment"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+```
+```{r beta regression for defoliation and visualization}
+library(dplyr)
+library(betareg)
+
+# only using rows that actually have defoliation recorded
+inj_defol <- injection %>%
+  filter(!is.na(Defoliation), !is.na(Assay_Day), !is.na(Treatment), !is.na(Alive)) %>%
+  mutate(
+    defol_01 = (Defoliation + 0.001) / 100.002,     
+    Treatment = factor(Treatment, levels = names(injection_palette))
+  )
+
+beta_defol_inj <- betareg(defol_01 ~ Treatment * Assay_Day + Alive, data = inj_defol)
+summary(beta_defol_inj)
+
+# predictions on the same rows (response scale 0–1)
+inj_defol <- inj_defol %>%
+  mutate(pred_beta = predict(beta_defol_inj, newdata = inj_defol, type = "response"))
+
+# build summaries in % units
+#mean from model preds; SE from observed proportions
+inj_beta_summary <- inj_defol %>%
+  group_by(Treatment, Assay_Day) %>%
+  summarise(
+    mean_pred = mean(pred_beta, na.rm = TRUE) * 100,                       # %
+    se_pred   = (sd(defol_01, na.rm = TRUE) / sqrt(n())) * 100,            # %
+    .groups   = "drop"
+  )
+
+inj_timeasfactor_data <- inj_defol %>%
+  mutate(predicted_defol = pred_beta * 100)  # %
+
+inj_timeasfactor_summary <- inj_beta_summary
+
+#individual dish lines per treatment
+ggplot() +
+  geom_line(
+    data = inj_timeasfactor_data,
+    aes(x = Assay_Day, y = predicted_defol, group = CPB_Group, color = Treatment),
+    alpha = 0.3,
+    size = 0.6
+  ) +
+  geom_ribbon(
+    data = inj_timeasfactor_summary,
+    aes(x = Assay_Day, ymin = mean_pred - se_pred, ymax = mean_pred + se_pred, fill = Treatment),
+    alpha = 0.2,
+    color = NA
+  ) +
+  geom_line(
+    data = inj_timeasfactor_summary,
+    aes(x = Assay_Day, y = mean_pred, color = Treatment),
+    size = 1.2
+  ) +
+  scale_color_manual(values = injection_palette) +
+  scale_fill_manual(values = injection_palette) +
+  labs(
+    x = "Assay Day",
+    y = "Defoliation (%)",
+    title = "Defoliation Over Time by Treatment (Beta Regression)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(), legend.position = "right")
+
+```
+
+# Survival Analyses:
+
+```{r kaplan-meier survival analysis}
+# expand rows for dead beetles
+inj_death_rows <- injection %>%
+  filter(Dead > 0) %>%
+  uncount(weights = Dead) %>%
+  mutate(time = Assay_Day, status = 1)
+
+# expand rows for surviving beetles
+inj_survivor_rows <- injection %>%
+  group_by(CPB_Group, Treatment) %>%
+  slice_max(Assay_Day, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Alive > 0) %>%
+  uncount(weights = Alive) %>%
+  mutate(time = Assay_Day, status = 0)
+
+# combine into survival dataset
+inj_survival_long <- bind_rows(inj_death_rows, inj_survivor_rows)
+
+# ensure factor levels are in your desired order
+treatment_levels <- c(
+  "Control_Uninjected", "Control_H2O", "Control_dsRNA",
+  "GPA2_Low", "GPA2_High", "LGR1_Low", "LGR1_High"
+)
+
+inj_survival_long <- inj_survival_long %>%
+  mutate(Treatment = factor(Treatment, levels = treatment_levels))
+
+# kaplan-meier fit
+inj_km_fit <- survfit(Surv(time, status) ~ Treatment, data = inj_survival_long)
+
+# injection palette
+injection_palette <- c(
+  "Treatment=Control_Uninjected" = "#A8E6A3",
+  "Treatment=Control_H2O"        = "#81C784",
+  "Treatment=Control_dsRNA"      = "#4CAF50",
+  "Treatment=GPA2_Low"           = "#81D4FA",
+  "Treatment=GPA2_High"          = "#0288D1",
+  "Treatment=LGR1_Low"           = "#CE93D8",
+  "Treatment=LGR1_High"          = "#8E24AA"
+)
+
+ggsurvplot(
+  inj_km_fit,
+  data = inj_survival_long,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlim = c(0, 28),
+  break.time.by = 2,
+  palette = injection_palette,
+  title = "Kaplan-Meier Survival by Treatment",
+  xlab = "Assay Day",
+  ylab = "Survival Probability"
+)
+
+# test for significance with log-rank test
+survdiff(Surv(time, status) ~ Treatment, data = inj_survival_long)
+
+# specific comparisons
+pairwise_survdiff(Surv(time, status) ~ Treatment, data = inj_survival_long,
+                  p.adjust.method = "BH")
+pairwise_survdiff(Surv(time, status) ~ Treatment, data = inj_survival_long,
+                  p.adjust.method = "bonferroni")
+```
+
+# Dataset for Development Analyses:
+
+```{r convert injection dataset for development modelling}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# load and clean raw injection data
+transformed_inj <- read.csv("Injection Trial Data.csv") %>%
+  select(-`Weight..g.`, -`X..Defoliation`)
+
+# pivot life stage columns to long format
+transformed_inj_long <- transformed_inj %>%
+  pivot_longer(
+    cols = c(Alive, Dead, Incapacitated, Pupating, Adults),  
+    names_to = "Life_Stage",  
+    values_to = "Count"       
+  )
+
+# expand each row so that each beetle is a separate row
+transformed_inj_expanded <- transformed_inj_long %>%
+  uncount(weights = Count)
+
+# define numeric life stage codes
+life_stage_codes <- c(
+  Alive = 1,
+  Incapacitated = 2,
+  Pupating = 3,
+  Adults = 4,
+  Dead = 5
+)
+
+# prepare wide-format daily counts by group
+inj_counts_wide <- transformed_inj %>%
+  mutate(across(c(Alive, Dead, Incapacitated, Pupating, Adults), as.integer)) %>%
+  arrange(`CPB.Group`, `Assay.Day`)
+
+# simulate beetle-level life stage assignment day by day
+inj_progression_list <- list()
+
+for (group in unique(inj_counts_wide$CPB.Group)) {
+  group_data <- inj_counts_wide %>%
+    filter(CPB.Group == group) %>%
+    arrange(`Assay.Day`)
+  
+  beetles <- tibble(Beetle_ID = 1:10, Stage = rep(1, 10))
+  group_history <- list()
+  
+  for (i in seq_len(nrow(group_data))) {
+    day <- group_data[i, ]
+    target_counts <- as.integer(day[c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")])
+    names(target_counts) <- c("Alive", "Incapacitated", "Pupating", "Adults", "Dead")
+    
+    remaining <- beetles
+    assigned <- NULL
+    
+    for (stage_name in rev(names(life_stage_codes))) {
+      code <- life_stage_codes[stage_name]
+      n_needed <- target_counts[stage_name]
+      eligible <- remaining %>% filter(Stage <= code)
+      selected <- if (nrow(eligible) >= n_needed) slice_head(eligible, n = n_needed) else eligible
+      
+      if (nrow(selected) > 0) {
+        selected$Stage <- code
+        assigned <- bind_rows(assigned, selected)
+        remaining <- anti_join(remaining, selected, by = "Beetle_ID")
+      }
+    }
+    
+    if (!is.null(assigned)) {
+      day_result <- assigned %>%
+        mutate(
+          CPB.Group = group,
+          Assay.Day = day$Assay.Day,
+          Date = day$Date,
+          Life_Stage = names(life_stage_codes)[Stage]
+        )
+      group_history[[i]] <- day_result
+      beetles <- assigned
+    }
+  }
+  
+  inj_progression_list[[group]] <- bind_rows(group_history)
+}
+
+# combine all beetles across all groups and days
+inj_beetle_progression <- bind_rows(inj_progression_list) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# build complete skeleton across all assay days up to 27, default from above code was shorter
+max_day <- 27  # or use: max(transformed_inj$Assay.Day, na.rm = TRUE)
+inj_skeleton <- transformed_inj %>%
+  distinct(CPB.Group) %>%
+  crossing(Beetle_ID = 1:10, Assay.Day = 1:max_day)
+
+# join observed progression to skeleton and fill forward stage
+inj_beetle_progression_filled <- inj_skeleton %>%
+  left_join(inj_beetle_progression, by = c("CPB.Group", "Assay.Day", "Beetle_ID")) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day) %>%
+  group_by(CPB.Group, Beetle_ID) %>%
+  fill(Stage, .direction = "down") %>%
+  ungroup() %>%
+  mutate(
+    Life_Stage = names(life_stage_codes)[Stage],
+    Life_Stage = factor(Life_Stage, levels = names(life_stage_codes), ordered = TRUE)
+  )
+
+# final clean output with globally unique Beetle_ID
+inj_beetle_prog <- inj_beetle_progression_filled %>%
+  select(CPB.Group, Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  arrange(CPB.Group, Beetle_ID, Assay.Day)
+
+# assign unique ID across all beetles
+unique_beetles <- inj_beetle_prog %>%
+  distinct(CPB.Group, Beetle_ID) %>%
+  arrange(CPB.Group, Beetle_ID) %>%
+  mutate(Global_Beetle_ID = row_number())
+
+inj_beetle_prog <- inj_beetle_prog %>%
+  left_join(unique_beetles, by = c("CPB.Group", "Beetle_ID")) %>%
+  select(CPB.Group, Global_Beetle_ID, Assay.Day, Stage, Life_Stage) %>%
+  rename(Beetle_ID = Global_Beetle_ID)
+
+# preview and export
+head(inj_beetle_prog)
+write.csv(inj_beetle_prog, "inj_data_transformed.csv", row.names = FALSE)
+
+# add in from, to, start, stop for transition specific modelling
+# add a run ID that increments each time the stage changes
+inj_transitions_grouped <- inj_beetle_prog %>%
+  arrange(Beetle_ID, Assay.Day) %>%
+  group_by(Beetle_ID) %>%
+  mutate(
+    stage_change = Stage != lag(Stage, default = first(Stage)),
+    run_id = cumsum(stage_change)
+  ) %>%
+  group_by(Beetle_ID, run_id) %>%
+  summarise(
+    CPB.Group = first(CPB.Group),
+    from = first(Stage),
+    start = min(Assay.Day),
+    stop = max(Assay.Day) + 1,  #end of the interval
+    .groups = "drop"
+  ) %>%
+  group_by(Beetle_ID) %>%
+  mutate(to = lead(from)) %>%  #get the next state
+  ungroup()
+
+# #add Life_Stage labels if desired
+# inj_transitions_grouped <- inj_transitions_grouped %>%
+#   mutate(
+#     from_label = factor(from, levels = 1:5, labels = names(life_stage_codes)),
+#     to_label   = factor(to,   levels = 1:5, labels = names(life_stage_codes))
+#   )
+
+inj_transitions_grouped <- inj_transitions_grouped %>%
+  select(-run_id)
+
+head(inj_transitions_grouped)
+write_csv(inj_transitions_grouped, file = "inj_data_start-stop.csv")
+```
+
+Data transformation success, yay! 
+
+Disease progression model needs all stages (1-2, 1-3, 1-4, 1-5, etc...) status and incidence indicate whether or not the event happened. Day of progression through one stage is the day another stage can potentially start.
+
+Reminder of lifestage codes:
+  Alive = 1,
+  Incapacitated = 2,
+  Pupating = 3,
+  Adults = 4,
+  Dead = 5
+  
+# Development Code:
+
+```{r set-up data}
+# read in the data
+library(readr)
+inj_data_start_stop <- read_csv("Injection Trial Data.csv")
+beetle_stages <- inj_data_start_stop
+
+# check out the data
+summary(beetle_stages)
+str(beetle_stages)
+
+# extract the treatments
+library(stringr)
+split_cols <- as.data.frame(str_split_fixed(beetle_stages$CPB.Group, "[.]", 2))
+colnames(split_cols) <- c("treatment", "rep")
+
+# join them onto the data
+beetle_stages_appended <- cbind(beetle_stages, split_cols)
+
+# add in a "time in state" variable, B(t)
+beetle_stages_appended$Bt <- beetle_stages_appended$stop-beetle_stages_appended$start
+```
+
+```{r examples of certain transitions}
+library(dplyr)
+# create a dataset to join onto
+
+# study only 1 to 2
+beetle_12 <- beetle_stages_appended %>% 
+  filter(from == 1) %>%
+  select(Beetle_ID, treatment, rep, from, to, start, stop) %>% 
+  mutate(to_for_status = 2) %>% 
+  mutate(status = ifelse(to_for_status == to, 1, 0)) %>% 
+  # Add a line that says 0 if.na. This changed the coutcome
+  mutate(status = ifelse(is.na(status), 0, status)) %>%
+  select(-to) %>% 
+  rename(to = to_for_status)
+
+# study only 2 to 5
+beetle_25 <- beetle_stages_appended %>% 
+  filter(from == 2) %>%
+  select(Beetle_ID, treatment, rep, from, to, start, stop) %>% 
+  mutate(to_for_status = 5) %>% 
+  mutate(status = ifelse(to_for_status == to, 1, 0)) %>% 
+  mutate(status = ifelse(is.na(status), 0, status)) %>%
+  select(-to) %>% 
+  rename(to = to_for_status)
+
+library("survival")
+
+### 1->2: remission to relapse
+obj12 <- coxph(Surv(start,stop,status)~ treatment
+               ,data=beetle_12,
+            subset=((from==1)&(to==2))
+            )
+summary(obj12)
+
+### try running 2->5: Incapacitated to death
+obj25 <- coxph(Surv(start,stop,status)~ treatment
+               ,data=beetle_25,
+            subset=((from==2)&(to==5))
+            )
+summary(obj25)
+```
+
+```{r model function}
+# Write a function
+#' A function that computes the status correctly (was there a transition) and when it occured
+#'
+#' @param from_stage - start stage
+#' @param to_stage - end stage
+#' @param df_in - input dataframe
+#'
+#' @returns - a list with the model and the dataset used to model it 
+#' @export
+#'
+#' @examples - model_1_to_2 <- multi_stage_model(from_stage = 1, to_stage = 2)
+multi_stage_model <- function(from_stage, to_stage, df_in = beetle_stages_appended, quad_3_4_flag = 1) {
+  # Extract the dataset
+  model_df <- {{df_in}} %>% 
+    # Only select the from stages that make sense
+    filter(from == from_stage) %>%
+    # Select only the variables needed in the model
+    select(Beetle_ID, treatment, rep, from, to, start, stop, Bt) %>% 
+    # Append a variable that's the target
+    mutate(to_for_status = to_stage) %>% 
+    # Create a status variable if the model actually moved
+    mutate(status = ifelse(to_for_status == to, 1, 0)) %>% 
+      # Add a line that says 0 if.na
+    mutate(status = ifelse(is.na(status), 0, status)) %>%
+    # De-select to, as this contains irrelevant "to" values. 
+    # The only one that matters is the "to_stage". If that doesn't occur, then the status is 0.
+    select(-to) %>% 
+    # Rename to
+    rename(to = to_for_status)
+  # Return the model
+  library("survival")
+  # Fit one of two models, depending on the "from" stage. If from = 1, don't include current time
+  if (from_stage == 1){
+    model <- coxph(Surv(start,stop,status)~ treatment, data=model_df,
+            subset=((from==from_stage)&(to==to_stage)))
+    print("Note: This model doesn't include the time in the current state as it starts from stage 1.")
+  } else if ((from_stage == 3) & (to_stage == 4) & (quad_3_4_flag == 1)){
+    model <- coxph(Surv(start,stop,status)~ Bt+I(Bt^2)+treatment, data=model_df,
+            subset=((from==from_stage)&(to==to_stage)))
+    print("Note: This model includes the time in the current state, plus the square of the current time, as it does not start from stage 1.")
+  } else{
+    model <- coxph(Surv(start,stop,status)~ Bt+treatment, data=model_df,
+            subset=((from==from_stage)&(to==to_stage)))
+    print("Note: This model includes the time in the current state as it does not start from stage 1.")
+  }
+  # Return the model and the model_df
+  return(list(model = model, model_df = model_df))
+}
+```
+
+```{r modelling and summaries}
+# run the model
+model_1_to_2 <- multi_stage_model(from_stage = 1, to_stage = 2)
+model_1_to_3 <- multi_stage_model(from_stage = 1, to_stage = 3)
+model_1_to_4 <- multi_stage_model(from_stage = 1, to_stage = 4) # Should be nonsense, as this had no events
+model_1_to_5 <- multi_stage_model(from_stage = 1, to_stage = 5)
+
+# start from 2
+model_2_to_5 <- multi_stage_model(from_stage = 2, to_stage = 5)
+
+# start from 3
+model_3_to_2 <- multi_stage_model(from_stage = 3, to_stage = 2) # No events
+model_3_to_4 <- multi_stage_model(from_stage = 3, to_stage = 4) # This uses the quadratic time model
+model_3_to_4_no_quad <- multi_stage_model(from_stage = 3, to_stage = 4, quad_3_4_flag = 0) # This uses the linear time model
+model_3_to_5 <- multi_stage_model(from_stage = 3, to_stage = 5) 
+
+# start from 4
+model_4_to_2 <- multi_stage_model(from_stage = 4, to_stage = 2) # No events?
+model_4_to_5 <- multi_stage_model(from_stage = 4, to_stage = 5) 
+
+# look at summaries
+model_1_to_2$model # Not significant (incapacitated)
+model_1_to_3$model # Significant
+model_1_to_5$model # Not
+model_2_to_5$model # Significant
+model_3_to_2$model # No events
+model_3_to_4$model # Significant, includes quadratic term
+model_3_to_5$model # Some of these p-values are high because there are no events that occured. For instance, no beetles in C2 transitioned to adulthood.
+model_4_to_2$model # No events
+model_4_to_5$model # Same as 3 to 5.
+```
+
+```{r compare model 3-4, fix isssue}
+# Compare 3 to 4
+model_3_to_4$model 
+model_3_to_4_no_quad$model # No issue
+
+BIC(model_3_to_4$model)
+BIC(model_3_to_4_no_quad$model)
+# The BIC for the no quad model is lower, but it is clearly misspecified per the visualization.
+```
+
+```{r visualize raw data as check}
+library(ggplot2)
+
+# look at three to four dataset
+model_1_to_3$model_df %>% 
+  # filter(status == 1) %>% 
+  mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = treatment, y = difference, color = as.factor(status))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+bad_df <- model_1_to_3$model_df %>% 
+  filter(status == 1) %>%
+  mutate(difference = as.numeric(stop - start))
+
+# mod <- lm(difference ~ as.factor(treatment), df = bad_df)
+bad_mod <- lm(bad_df$difference ~ bad_df$treatment)
+summary(bad_mod)
+
+summary(model_1_to_3$model)
+
+# look at three to four dataset
+model_3_to_4$model_df %>% 
+  # filter(status == 1) %>% 
+  mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = treatment, y = difference, color = as.factor(status))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at three to five dataset
+model_3_to_5$model_df %>% 
+  # filter(status == 1) %>% 
+  mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = treatment, y = difference, color = as.factor(status))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at four to five dataset
+model_4_to_5$model_df %>% 
+  # filter(status == 1) %>% 
+  mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = treatment, y = difference, color = as.factor(status))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at time in stage vs. probability of survival
+model_2_to_5$model_df %>% 
+  # filter(status == 1) %>% 
+  # mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = Bt, y = status, color = as.factor(treatment))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at time in stage vs. probability of survival
+model_3_to_4$model_df %>% 
+  # filter(status == 1) %>% 
+  # mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = Bt, y = status, color = as.factor(treatment))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at time in stage vs. probability of survival
+model_3_to_5$model_df %>% 
+  # filter(status == 1) %>% 
+  # mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = Bt, y = status, color = as.factor(treatment))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+
+# look at time in stage vs. probability of survival
+model_4_to_5$model_df %>% 
+  # filter(status == 1) %>% 
+  # mutate(difference = stop - start) %>% 
+  #
+  ggplot(aes(x = Bt, y = status, color = as.factor(treatment))) +
+  geom_point(position = position_jitter(width = 0.2, height = 0))
+```
+
+```{r}
+library(emmeans)
+EMM <- emmeans(model_3_to_4$model, "treatment")   
+EMM    
+
+### pairwise comparisons
+contrast(EMM, "pairwise")    # or pairs(EMM)
+contrast(EMM, "pairwise",  type = "response")   # or pairs(EMM)
+```
