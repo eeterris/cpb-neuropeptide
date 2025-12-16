@@ -843,7 +843,7 @@ feeding_3_start_stop <- feeding_3_prog %>%
   select(-run_id)
 
 # export final feeding transitions
-write_csv(feeding_3_start_stop, "feeding_3_start-stop.csv")
+write_csv(feeding_3_start_stop, here("results", "feeding", "feeding_3_start_stop.csv"))
 
 head(feeding_3_start_stop)
 
@@ -859,7 +859,7 @@ library(ggplot2)
 library(emmeans)
 
 # read in feeding_3 data
-feeding_3_start_stop <- read_csv("feeding_3_start-stop.csv")
+#feeding_3_start_stop <- read_csv("feeding_3_start-stop.csv")
 beetle_stages <- feeding_3_start_stop
 
 # split treatment & replicate
@@ -1012,7 +1012,9 @@ library(readr)
 library(stringr)
 
 # load and clean raw feeding_4 data 
-feeding_4_raw <- read.csv("feeding_4th.csv") %>%
+feeding_4_raw <- readr::read_csv(
+  here("data", "derived", "feeding_4th.csv")
+) %>%
   select(-`Weight..g.`, -`X..Defoliation`, -Notes, -GroupCore, -Instar, 
          -avg_beetle_weight, -defol_corrected, -GroupPrefix, -Adults) %>%  # remove duplicate Adults col
   rename(Adults = `Emerged.Adults`,
@@ -1135,10 +1137,15 @@ feeding_4_prog <- feeding_4_prog %>%
   rename(Beetle_ID = Global_Beetle_ID)
 
 # export
-write.csv(feeding_4_prog, "feeding_4_beetle_prog.csv", row.names = FALSE)
+readr::write_csv(
+  feeding_4_prog,
+  here("results", "feeding", "feeding_4_beetle_prog.csv")
+)
 
 # FIX: Merge corrected C1 developmental data
-feeding_4_C1 <- read_csv("feeding_4_C1_corrected.csv")
+feeding_4_C1 <- readr::read_csv(
+  here("data", "derived", "feeding_4_C1_corrected.csv")
+)
 
 feeding_4_fixed <- feeding_4_prog %>%
   filter(!str_detect(CPB.Group, "^C1")) %>%   # remove corrupted C1
@@ -1151,9 +1158,10 @@ feeding_4_fixed %>%
   arrange(Stage)
 
 # export fixed progression for modeling
-write_csv(feeding_4_fixed, "feeding_4_beetle_prog_fixed.csv")
-
-
+readr::write_csv(
+  feeding_4_fixed,
+  here("results", "feeding", "feeding_4_beetle_prog_fixed.csv")
+)
 
 # build start–stop transition table
 feeding_4_start_stop <- feeding_4_prog %>%
@@ -1177,7 +1185,10 @@ feeding_4_start_stop <- feeding_4_prog %>%
   select(-run_id)
 
 # export final transitions
-write_csv(feeding_4_start_stop, "feeding_4_start-stop.csv")
+readr::write_csv(
+  feeding_4_start_stop,
+  here("results", "feeding", "feeding_4_start_stop.csv")
+)
 
 head(feeding_4_start_stop)
 
@@ -1195,7 +1206,8 @@ library(ggplot2)
 library(emmeans)
 
 # read in feeding_4 data
-feeding_4 <- read_csv("feeding_4_start-stop.csv")
+#feeding_4 <- read_csv("feeding_4_start-stop.csv")
+feeding_4 <- feeding_4_start_stop
 
 # split treatment & replicate from CPB.Group 
 split_cols_4 <- as.data.frame(str_split_fixed(feeding_4$CPB.Group, "[.]", 2))
