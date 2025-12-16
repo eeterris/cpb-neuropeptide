@@ -696,7 +696,10 @@ library(tidyr)
 library(purrr)
 
 # load and clean raw injection data
-transformed_inj <- read.csv("Injection Trial Data.csv") %>%
+# load and clean raw injection data
+transformed_inj <- readr::read_csv(
+  here("data", "inputs", "injection_trial_data.csv")
+) %>%
   select(-`Weight..g.`, -`X..Defoliation`)
 
 # pivot life stage columns to long format
@@ -813,7 +816,10 @@ inj_beetle_prog <- inj_beetle_prog %>%
 
 # preview and export
 head(inj_beetle_prog)
-write.csv(inj_beetle_prog, "inj_data_transformed.csv", row.names = FALSE)
+readr::write_csv(
+  inj_beetle_prog,
+  here("results", "injection", "inj_data_transformed.csv")
+)
 
 # add in from, to, start, stop for transition specific modelling
 # add a run ID that increments each time the stage changes
@@ -847,7 +853,10 @@ inj_transitions_grouped <- inj_transitions_grouped %>%
   select(-run_id)
 
 head(inj_transitions_grouped)
-write_csv(inj_transitions_grouped, file = "inj_data_start-stop.csv")
+readr::write_csv(
+  inj_transitions_grouped,
+  here("results", "injection", "inj_data_start_stop.csv")
+)
 ```
 
 Data transformation success, yay! 
@@ -866,7 +875,7 @@ Reminder of lifestage codes:
 ```{r set-up data}
 # read in the data
 library(readr)
-inj_data_start_stop <- read_csv("Injection Trial Data.csv")
+#inj_data_start_stop <- read_csv("Injection Trial Data.csv")
 beetle_stages <- inj_data_start_stop
 
 # check out the data
