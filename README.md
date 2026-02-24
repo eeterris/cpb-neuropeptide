@@ -65,10 +65,6 @@ All outputs will be written to the appropriate subdirectory of `results/`.
 
 If you use or adapt this code, please cite the associated manuscript:
 
-> Terris, E. et al. (YEAR). *Title*. Journal. DOI
-
-A repository DOI may be added upon archival (e.g., Zenodo) following manuscript
-acceptance.
 
 ## Repository status
 
